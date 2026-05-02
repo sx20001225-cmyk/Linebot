@@ -1,0 +1,6 @@
+[build]
+builder = "buildpacks"
+buildpack = "python"
+
+[start]
+cmd = "python line_bot.py"
