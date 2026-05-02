@@ -1,8 +1,8 @@
 """
-LINE Bot AI 助手 - 加密貨幣交易控制系統
+LINE Bot AI 助手 - 加密貨幣交易控制系統 (Claude 版)
 功能：
 1. 接收 LINE 訊息 (Webhook)
-2. 用 GPT 解析使用者意圖
+2. 用 Claude 解析使用者意圖
 3. 查詢 MySQL（持倉、交易記錄、設定）
 4. 查詢 Binance API（即時餘額、價格）
 5. 修改 bot_config（暫停、恢復、調整參數）
@@ -20,7 +20,7 @@ from typing import Optional, Dict, Any
 import pymysql
 import requests
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from openai import OpenAI
+from anthropic import Anthropic
 
 # ============================================================================
 # 設定
@@ -36,9 +36,9 @@ LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_API_URL = "https://api.line.me/v2/bot"
 
-# OpenAI
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-GPT_MODEL = os.getenv('GPT_MODEL', 'gpt-4o-mini')  # 便宜且快
+# Anthropic Claude
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+CLAUDE_MODEL = os.getenv('CLAUDE_MODEL', 'claude-haiku-4-5')  # 便宜且快
 
 # MySQL
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -53,7 +53,7 @@ ALLOWED_USER_IDS = os.getenv('LINE_ALLOWED_USER_IDS', '').split(',')
 
 # 初始化
 app = FastAPI()
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
 
 # ============================================================================
@@ -268,61 +268,74 @@ def update_bot_config(field: str, value) -> bool:
 
 SYSTEM_PROMPT = """你是「CryptoBot AI」，一個加密貨幣自動交易機器人的智能助手。
 
-使用者會用自然語言問你問題或下指令。你的任務是：
-1. 識別意圖並回傳結構化 JSON
-2. 用繁體中文回應，語氣親切但專業
-3. 加適當的 emoji（但不過量）
+使用者會用自然語言問你問題或下指令。你必須回傳結構化 JSON，**只回傳 JSON，不要有任何其他文字**（不要 markdown code block，不要解釋，直接 JSON）。
 
 可用的「意圖」(intent)：
 - `query_status`: 查詢系統狀態（持倉、餘額、運行狀態）
-- `query_trades`: 查詢交易記錄（最近 N 筆）
-- `query_config`: 查詢設定（槓桿、止損、監控幣種等）
-- `query_pnl`: 查詢盈虧（今日/總計）
-- `query_market`: 查詢某個幣的市場狀況
+- `query_trades`: 查詢交易記錄
+- `query_config`: 查詢設定
+- `query_pnl`: 查詢盈虧
+- `query_market`: 查詢某個幣的市場狀況（params 要有 symbol 欄位，如 BTCUSDT）
 - `action_pause`: 暫停機器人
 - `action_resume`: 恢復機器人
-- `action_change_leverage`: 改變槓桿
-- `action_add_pair`: 新增監控幣種
-- `action_remove_pair`: 移除監控幣種
-- `chat`: 一般對話、市場分析、投資建議等
+- `action_change_leverage`: 改變槓桿（params: {"leverage": 5}）
+- `action_add_pair`: 新增監控幣種（params: {"pair": "ETHUSDT", "type": "long"}, type 可為 main/long/short）
+- `action_remove_pair`: 移除監控幣種（params: {"pair": "ETHUSDT"}）
+- `chat`: 一般對話、市場分析、笑話、閒聊等
 
-回傳 JSON 格式：
-{
-  "intent": "意圖名稱",
-  "params": { "key": "value" },
-  "response": "簡短回覆訊息（如果是 chat 則完整回答）"
-}
+JSON 格式：
+{"intent": "意圖名稱", "params": {}, "response": "回覆內容"}
 
-範例：
-- 使用者說「BTC 漲了多少？」→ intent: query_market, params: {"symbol": "BTCUSDT"}
-- 使用者說「停止機器人」→ intent: action_pause
-- 使用者說「把槓桿改成 5 倍」→ intent: action_change_leverage, params: {"leverage": 5}
-- 使用者說「加 ETH 進去監控」→ intent: action_add_pair, params: {"pair": "ETHUSDT", "type": "long"}
-- 使用者說「給我市場分析」→ intent: chat, response: "完整分析..."
+範例輸入 → JSON 輸出：
 
-只回傳 JSON，不要有其他文字。"""
+「BTC 多少？」 → {"intent": "query_market", "params": {"symbol": "BTCUSDT"}, "response": ""}
+
+「停止機器人」 → {"intent": "action_pause", "params": {}, "response": ""}
+
+「把槓桿改成 5 倍」 → {"intent": "action_change_leverage", "params": {"leverage": 5}, "response": ""}
+
+「加 ETH 進去做多」 → {"intent": "action_add_pair", "params": {"pair": "ETHUSDT", "type": "long"}, "response": ""}
+
+「給我講個笑話」 → {"intent": "chat", "params": {}, "response": "為什麼比特幣不喜歡冬天？因為它怕被『凍結』！😄"}
+
+「你現在用什麼模型」 → {"intent": "chat", "params": {}, "response": "我使用 Anthropic Claude 模型 🤖 我可以幫你查行情、控制機器人、聊天。試試看「狀態」或「BTC 多少」！"}
+
+「我心情不好」 → {"intent": "chat", "params": {}, "response": "聽到你心情不好，要不要說說發生什麼事？我會在這裡聽你說 💛"}
+
+對於 chat 意圖，response 要用繁體中文，親切但專業，加適當 emoji（不過量）。記住：只輸出 JSON，無其他文字。"""
 
 
 def parse_user_intent(text: str) -> dict:
-    """用 GPT 解析使用者意圖"""
-    if not openai_client:
-        return {'intent': 'chat', 'response': '⚠️ AI 服務未設定（缺少 OPENAI_API_KEY）'}
+    """用 Claude 解析使用者意圖"""
+    if not anthropic_client:
+        return {'intent': 'chat', 'response': '⚠️ AI 服務未設定（缺少 ANTHROPIC_API_KEY）'}
     
     try:
-        resp = openai_client.chat.completions.create(
-            model=GPT_MODEL,
+        resp = anthropic_client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": text},
             ],
-            temperature=0.3,
-            response_format={"type": "json_object"},
         )
-        result = json.loads(resp.choices[0].message.content)
+        # Claude 回傳的內容在 content[0].text
+        content = resp.content[0].text.strip()
+        
+        # 移除可能的 markdown code block (```json ... ```)
+        if content.startswith('```'):
+            lines = content.split('\n')
+            content = '\n'.join(lines[1:-1] if lines[-1].startswith('```') else lines[1:])
+        
+        result = json.loads(content)
         return result
+    except json.JSONDecodeError as e:
+        logger.error(f"Claude JSON parse error: {e}, content: {content[:200] if 'content' in dir() else 'N/A'}")
+        # JSON 解析失敗就把整段當作 chat 回應
+        return {'intent': 'chat', 'response': content if 'content' in dir() else '😅 我有點困惑'}
     except Exception as e:
-        logger.error(f"GPT parse error: {e}")
-        return {'intent': 'chat', 'response': f'😅 我有點困惑，能換個方式說嗎？'}
+        logger.error(f"Claude API error: {e}")
+        return {'intent': 'chat', 'response': f'😅 系統錯誤：{str(e)[:100]}'}
 
 
 # ============================================================================
@@ -694,11 +707,12 @@ def handle_postback(user_id: str, data: str, reply_token: str):
 @app.get("/")
 def root():
     return {
-        "service": "CryptoBot LINE AI",
+        "service": "CryptoBot LINE AI (Claude)",
         "status": "running",
-        "openai": bool(OPENAI_API_KEY),
+        "anthropic": bool(ANTHROPIC_API_KEY),
         "line": bool(LINE_CHANNEL_ACCESS_TOKEN),
         "database": bool(DATABASE_URL),
+        "model": CLAUDE_MODEL,
     }
 
 
