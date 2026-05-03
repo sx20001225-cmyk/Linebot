@@ -411,7 +411,7 @@ def parse_user_intent(text: str) -> dict:
     try:
         resp = anthropic_client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=1024,
+            max_tokens=2048,
             system=SYSTEM_PROMPT,
             messages=[
                 {"role": "user", "content": text},
@@ -426,6 +426,35 @@ def parse_user_intent(text: str) -> dict:
             content = '\n'.join(lines[1:-1] if lines[-1].startswith('```') else lines[1:])
         
         result = json.loads(content)
+        
+        # 如果 Claude 回傳的是陣列（多個指令），合併成一個回應
+        if isinstance(result, list):
+            if len(result) == 0:
+                return {'intent': 'chat', 'response': '😅 我沒有理解你的意思'}
+            
+            # 如果只有一個元素，直接返回
+            if len(result) == 1:
+                return result[0]
+            
+            # 多個元素：合併成單一回應
+            # 處理每個意圖，把所有 chat 類的 response 串起來
+            combined_responses = []
+            for item in result:
+                intent = item.get('intent', 'chat')
+                if intent == 'chat':
+                    # 純對話：把 response 加入合併文字
+                    if item.get('response'):
+                        combined_responses.append(item['response'])
+                else:
+                    # 有實際操作的意圖：標註但不執行（避免一次執行多個操作）
+                    combined_responses.append(f"⚠️ 偵測到操作指令「{intent}」，請單獨傳送以執行。")
+            
+            return {
+                'intent': 'chat',
+                'params': {},
+                'response': '\n\n━━━━━━━━━━━━━━━\n\n'.join(combined_responses)
+            }
+        
         return result
     except json.JSONDecodeError as e:
         logger.error(f"Claude JSON parse error: {e}, content: {content[:200] if 'content' in dir() else 'N/A'}")
